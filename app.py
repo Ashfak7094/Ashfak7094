@@ -13,9 +13,6 @@ import aiohttp
 APIKEY = os.getenv("BINANCEAPI_KEY")
 APISECRET = os.getenv("BINANCESECRET")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID", "")  # DIRECT USER ID
-
 PAPERMODE = os.getenv("PAPERMODE", "true").lower() == "true"
 
 USD_RISK_PCT = 0.002
@@ -49,29 +46,31 @@ logging.basicConfig(
 logger = logging.getLogger("TITAN")
 
 # =========================
-# TELEGRAM (DIRECT DM ONLY)
+# TELEGRAM (DIRECT DM)
 # =========================
 async def send_telegram(msg: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_USER_ID:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    user_id = os.getenv("TELEGRAM_USER_ID")
+
+    if not token or not user_id:
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "chat_id": int(TELEGRAM_USER_ID),
+        "chat_id": int(user_id),
         "text": msg,
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
 
     try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5)
-        ) as session:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status != 200:
-                    logger.warning(await resp.text())
+                    print(f"❌ Telegram API Error: {await resp.text()}")
     except Exception as e:
-        logger.warning(f"Telegram DM error: {e}")
+        print(f"❌ Telegram Connection Error: {e}")
 
 # =========================
 # TITAN HFT v6.2
@@ -101,7 +100,6 @@ class TitanHFTv62:
         self.shutdown_flag = False
         self.rate_limit_warnings = 0
 
-    # -------------------------
     async def startup(self):
         if not PAPERMODE and not (APIKEY and APISECRET):
             raise RuntimeError("LIVE mode requires API keys")
@@ -117,7 +115,6 @@ class TitanHFTv62:
             f"Symbols: {len(self.symbols)}"
         )
 
-    # -------------------------
     async def refresh_symbols(self):
         tickers = await self.exchange.fetch_tickers()
         candidates = []
@@ -135,7 +132,6 @@ class TitanHFTv62:
         self.symbols = [s for s, _ in candidates[:MAX_SYMBOLS_PER_CYCLE + 2]]
         logger.info(f"Loaded {len(self.symbols)} symbols")
 
-    # -------------------------
     async def get_balance(self) -> float:
         now = time.time()
         if now - self.balance_cache_time > 30:
@@ -147,7 +143,6 @@ class TitanHFTv62:
                 pass
         return max(self.balance_cache, 25.0)
 
-    # -------------------------
     def calculate_qty(self, balance: float, price: float, atr: float) -> float:
         risk_usd = balance * USD_RISK_PCT
         stop_dist = atr * 2.2
@@ -156,7 +151,6 @@ class TitanHFTv62:
         qty = min(pos_value, max_exposure) / price
         return round(qty, 6)
 
-    # -------------------------
     async def compute_signal(self, symbol: str) -> Tuple[bool, float]:
         buf = self.buffers.get(symbol)
         if not buf or len(buf) < 35:
@@ -178,7 +172,6 @@ class TitanHFTv62:
         score = sum([rsi_ok, macd_ok, vol_ok, atr_ok])
         return score >= 3, float(atr)
 
-    # -------------------------
     async def sufficient_liquidity(self, symbol: str) -> bool:
         try:
             ob = await self.exchange.fetch_order_book(f"{symbol}/USDT", 5)
@@ -189,7 +182,6 @@ class TitanHFTv62:
         except:
             return False
 
-    # -------------------------
     async def execute_buy(self, symbol: str, price: float, atr: float):
         if symbol in self.trades or len(self.trades) >= MAX_TRADES or time.time() < self.cooldowns[symbol]:
             return
@@ -213,7 +205,6 @@ class TitanHFTv62:
 
         await send_telegram(f"🟢 <b>BUY {symbol}</b>\nValue: ${qty*price:.2f}")
 
-    # -------------------------
     async def manage_trade(self, symbol: str):
         trade = self.trades.get(symbol)
         if not trade:
@@ -237,7 +228,6 @@ class TitanHFTv62:
         elif price <= stop:
             await self.execute_sell(symbol, False, "TRAIL")
 
-    # -------------------------
     async def execute_sell(self, symbol: str, partial: bool, reason: str):
         trade = self.trades.get(symbol)
         if not trade:
@@ -256,7 +246,6 @@ class TitanHFTv62:
 
         await send_telegram(f"🔴 <b>SELL {symbol}</b>\nReason: {reason}")
 
-    # -------------------------
     async def process_symbol(self, symbol: str):
         try:
             ohlcv = await self.exchange.fetch_ohlcv(f"{symbol}/USDT", TIMEFRAME, limit=50)
@@ -275,14 +264,12 @@ class TitanHFTv62:
                 self.rate_limit_warnings += 1
                 logger.warning("429 RATE LIMIT")
 
-    # -------------------------
     async def run(self):
         await self.startup()
         while not self.shutdown_flag:
             await asyncio.gather(*(self.process_symbol(s) for s in self.symbols[:MAX_SYMBOLS_PER_CYCLE]))
             await asyncio.sleep(CYCLE_TIME * 2 if self.rate_limit_warnings > 3 else CYCLE_TIME)
 
-    # -------------------------
     async def shutdown(self):
         for s in list(self.trades):
             await self.execute_sell(s, False, "SHUTDOWN")
