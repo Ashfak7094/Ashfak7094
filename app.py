@@ -18,9 +18,9 @@ import pandas as pd
 import pandas_ta as ta
 import aiohttp
 
-APIKEY = os.getenv("BINANCEAPI_KEY")
-APISECRET = os.getenv("BINANCESECRET")
-PAPERMODE = os.getenv("PAPERMODE", "true").lower() == "true"
+APIKEY = "25u5Q0ZS0CXK5CK6hrya3zcO6hx28yu5Y0byPQzQAxYBB6pdZolLjLqVCk2ftsdu"
+APISECRET = "7aGtW1PtA5Gm4Wqkj0BPuMl1oo4Fad5a8CtTE1ZAuNO7p5zfn1Mrxn5KmvE8QGqY"
+PAPERMODE = "true"
 
 MAX_POOL_SIZE = 350
 TARGET_SCAN_SIZE = 280
@@ -98,8 +98,8 @@ class TitanHFTv633:
         await self.tg_queue.put(msg)
 
     async def _telegram_worker(self):
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        user_id = os.getenv("TELEGRAM_USER_ID")
+        token = "7938320826:AAG8xlvqdUb42FU-bf9tmVYE1SH8kG_6_FA"
+        user_id = 5138274404
         if not token or not user_id:
             logger.warning("Telegram not configured (missing token/user_id)")
             return
