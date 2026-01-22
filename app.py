@@ -13,8 +13,8 @@ import aiohttp
 APIKEY = os.getenv("BINANCEAPI_KEY")
 APISECRET = os.getenv("BINANCESECRET")
 
-TELEGRAMTOKEN = os.getenv("TELEGRAMTOKEN", "")
-TELEGRAMCHATID = os.getenv("TELEGRAMCHATID", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_USER_ID = os.getenv("TELEGRAM_USER_ID", "")  # DIRECT USER ID
 
 PAPERMODE = os.getenv("PAPERMODE", "true").lower() == "true"
 
@@ -49,24 +49,29 @@ logging.basicConfig(
 logger = logging.getLogger("TITAN")
 
 # =========================
-# TELEGRAM
+# TELEGRAM (DIRECT DM ONLY)
 # =========================
 async def send_telegram(msg: str):
-    if not TELEGRAMTOKEN or not TELEGRAMCHATID:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_USER_ID:
         return
-    url = f"https://api.telegram.org/bot{TELEGRAMTOKEN}/sendMessage"
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": int(TELEGRAM_USER_ID),
+        "text": msg,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+
     try:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=5)
-        ) as s:
-            await s.post(url, json={
-                "chat_id": TELEGRAMCHATID,
-                "text": msg,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            })
+        ) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.warning(await resp.text())
     except Exception as e:
-        logger.warning(f"Telegram error: {e}")
+        logger.warning(f"Telegram DM error: {e}")
 
 # =========================
 # TITAN HFT v6.2
@@ -124,12 +129,10 @@ class TitanHFTv62:
                 continue
             if t.get("quoteVolume", 0) < MIN_QUOTE_VOL:
                 continue
-
             candidates.append((sym.replace("/USDT", ""), t["quoteVolume"]))
 
         candidates.sort(key=lambda x: x[1], reverse=True)
         self.symbols = [s for s, _ in candidates[:MAX_SYMBOLS_PER_CYCLE + 2]]
-
         logger.info(f"Loaded {len(self.symbols)} symbols")
 
     # -------------------------
@@ -159,20 +162,13 @@ class TitanHFTv62:
         if not buf or len(buf) < 35:
             return False, 0.0
 
-        df = pd.DataFrame(
-            buf, columns=["ts", "o", "h", "l", "c", "v"]
-        )
-
+        df = pd.DataFrame(buf, columns=["ts", "o", "h", "l", "c", "v"])
         close = df["c"].iloc[-1]
 
         rsi_ok = 48 <= ta.rsi(df["c"], 14).iloc[-1] <= 72
 
         macd = ta.macd(df["c"])
-        macd_ok = (
-            macd["MACD_12_26_9"].iloc[-1]
-            > macd["MACDs_12_26_9"].iloc[-1]
-            > 0
-        )
+        macd_ok = macd["MACD_12_26_9"].iloc[-1] > macd["MACDs_12_26_9"].iloc[-1] > 0
 
         vol_ok = df["v"].iloc[-1] > df["v"].tail(21).mean() * 1.6
 
@@ -195,23 +191,16 @@ class TitanHFTv62:
 
     # -------------------------
     async def execute_buy(self, symbol: str, price: float, atr: float):
-        if (
-            symbol in self.trades
-            or len(self.trades) >= MAX_TRADES
-            or time.time() < self.cooldowns[symbol]
-        ):
+        if symbol in self.trades or len(self.trades) >= MAX_TRADES or time.time() < self.cooldowns[symbol]:
             return
 
         bal = await self.get_balance()
         qty = self.calculate_qty(bal, price, atr)
-
         if qty * price < 6:
             return
 
         if not PAPERMODE:
-            order = await self.exchange.create_market_buy_order(
-                f"{symbol}/USDT", qty
-            )
+            order = await self.exchange.create_market_buy_order(f"{symbol}/USDT", qty)
             price = float(order.get("average", price))
 
         self.trades[symbol] = {
@@ -222,10 +211,7 @@ class TitanHFTv62:
             "breakeven": False
         }
 
-        await send_telegram(
-            f"🟢 <b>BUY {symbol}</b>\n"
-            f"Value: ${qty*price:.1f}"
-        )
+        await send_telegram(f"🟢 <b>BUY {symbol}</b>\nValue: ${qty*price:.2f}")
 
     # -------------------------
     async def manage_trade(self, symbol: str):
@@ -235,17 +221,15 @@ class TitanHFTv62:
 
         t = await self.exchange.fetch_ticker(f"{symbol}/USDT")
         price = t["last"]
-
         trade["high"] = max(trade["high"], price)
 
         if not trade["breakeven"] and price >= trade["entry"] * 1.005:
             trade["breakeven"] = True
             trade["entry"] = price
-            await send_telegram(f"⚡ Breakeven {symbol}")
+            await send_telegram(f"⚡ <b>BREAKEVEN {symbol}</b>")
 
         trail = max(TRAIL_MIN_PCT, trade["atr"] * 2.3 / price)
         stop = trade["high"] * (1 - trail)
-
         profit = price / trade["entry"] - 1
 
         if profit >= TARGET_PROFIT_PCT:
@@ -262,9 +246,7 @@ class TitanHFTv62:
         qty = trade["qty"] * (PARTIAL_TP_PCT if partial else 1.0)
 
         if not PAPERMODE:
-            await self.exchange.create_market_sell_order(
-                f"{symbol}/USDT", qty
-            )
+            await self.exchange.create_market_sell_order(f"{symbol}/USDT", qty)
 
         if partial:
             trade["qty"] -= qty
@@ -272,16 +254,12 @@ class TitanHFTv62:
             del self.trades[symbol]
             self.cooldowns[symbol] = time.time() + COOLDOWN_SECONDS
 
-        await send_telegram(
-            f"🔴 <b>SELL {symbol}</b>\nReason: {reason}"
-        )
+        await send_telegram(f"🔴 <b>SELL {symbol}</b>\nReason: {reason}")
 
     # -------------------------
     async def process_symbol(self, symbol: str):
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(
-                f"{symbol}/USDT", TIMEFRAME, limit=50
-            )
+            ohlcv = await self.exchange.fetch_ohlcv(f"{symbol}/USDT", TIMEFRAME, limit=50)
             self.buffers.setdefault(symbol, deque(maxlen=60))
             self.buffers[symbol].extend(ohlcv[-10:])
 
@@ -295,21 +273,14 @@ class TitanHFTv62:
         except Exception as e:
             if "429" in str(e):
                 self.rate_limit_warnings += 1
-                logger.warning("429 rate limit")
+                logger.warning("429 RATE LIMIT")
 
     # -------------------------
     async def run(self):
         await self.startup()
-
         while not self.shutdown_flag:
-            tasks = [
-                self.process_symbol(s)
-                for s in self.symbols[:MAX_SYMBOLS_PER_CYCLE]
-            ]
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-            delay = CYCLE_TIME * 2 if self.rate_limit_warnings > 3 else CYCLE_TIME
-            await asyncio.sleep(delay)
+            await asyncio.gather(*(self.process_symbol(s) for s in self.symbols[:MAX_SYMBOLS_PER_CYCLE]))
+            await asyncio.sleep(CYCLE_TIME * 2 if self.rate_limit_warnings > 3 else CYCLE_TIME)
 
     # -------------------------
     async def shutdown(self):
